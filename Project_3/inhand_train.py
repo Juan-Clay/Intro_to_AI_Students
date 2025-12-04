@@ -18,7 +18,7 @@ os.makedirs(log_dir, exist_ok=True)
 # LEARNING_RATE = 3e-4
 # DEVICE = 'cpu' # 'cuda' or 'cpu'
 # --- Q-learning configuration ---
-NUM_EPISODES = 2000
+NUM_EPISODES = 500
 MAX_STEPS_PER_EPISODE = 300
 
 # Q-learning hyperparameters (tune as you like)
