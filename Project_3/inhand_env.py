@@ -5,7 +5,7 @@ import mujoco
 import mujoco.viewer as mjv
 import gymnasium as gym
 from gymnasium import spaces
-
+from scipy.spatial.transform import Rotation as R
 from simulation import Simulation
 
 MAX_EPISODE_STEPS = 300
@@ -180,3 +180,108 @@ class CanRotateEnv(gym.Env):
         if self.viewer:
             self.viewer.close()
             self.viewer = None
+
+
+class DiscreteCanRotateEnv(gym.Env):
+    """
+    Wrapper around CanRotateEnv that:
+      - Uses a discrete state: cube yaw angle binned into N bins
+      - Uses a small set of discrete hand actions (16D delta joint angles)
+    This is the environment used for the Q-learning + Q-table agent.
+    """
+
+    metadata = {'render_modes': ['human'], 'render_fps': 30}
+
+    def __init__(self, render_mode=None):
+        super().__init__()
+        # Underlying continuous environment
+        self.base_env = CanRotateEnv(render_mode=render_mode)
+
+        # --- Discrete state: yaw angle bins ---
+        self.n_yaw_bins = 24
+        self.bin_size_deg = 360.0 / self.n_yaw_bins
+        self.observation_space = spaces.Discrete(self.n_yaw_bins)
+
+        # --- Discrete actions: hand motion primitives ---
+        self.discrete_actions = self._init_actions()
+        self.action_space = spaces.Discrete(len(self.discrete_actions))
+
+        self.render_mode = render_mode
+
+    def _init_actions(self):
+        """
+        Define a small set of 16D action vectors that move the hand in
+        different ways. These are deltas added to the current joint angles.
+        """
+        # All fingers close / open
+        close_all = np.full(16, 0.02, dtype=np.float32)
+        open_all = -close_all
+
+        # First half close, second half open (and inverse)
+        close_first_open_second = np.concatenate(
+            [np.full(8, 0.02, dtype=np.float32),
+             np.full(8, -0.02, dtype=np.float32)]
+        )
+        open_first_close_second = -close_first_open_second
+
+        # Alternating pattern (and inverse)
+        alt_pattern = np.array(
+            [0.02 if i % 2 == 0 else -0.02 for i in range(16)],
+            dtype=np.float32
+        )
+        alt_pattern_inv = -alt_pattern
+
+        return [
+            close_all,
+            open_all,
+            close_first_open_second,
+            open_first_close_second,
+            alt_pattern,
+            alt_pattern_inv,
+        ]
+
+    def _get_yaw_deg(self):
+        """
+        Compute the object's yaw (Z rotation in degrees) from the MuJoCo quaternion.
+        """
+        quat_wxyz = self.base_env.sim.data.xquat[self.base_env.obj_body_id]
+        # Convert (w, x, y, z) -> (x, y, z, w)
+        quat_xyzw = np.array(
+            [quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]],
+            dtype=np.float64,
+        )
+        r = R.from_quat(quat_xyzw)
+        euler_deg = r.as_euler("xyz", degrees=True)
+        return float(euler_deg[2])
+
+    def _obs_to_state(self):
+        """
+        Map the continuous yaw angle into a discrete bin index [0, n_yaw_bins-1].
+        """
+        yaw = self._get_yaw_deg()
+        yaw_wrapped = (yaw + 360.0) % 360.0
+        bin_idx = int(yaw_wrapped // self.bin_size_deg)
+        bin_idx = int(np.clip(bin_idx, 0, self.n_yaw_bins - 1))
+        return bin_idx
+
+    def reset(self, seed=None, options=None):
+        obs, info = self.base_env.reset(seed=seed, options=options)
+        # We ignore the continuous obs and return the discrete state index instead
+        state = self._obs_to_state()
+        return state, info
+
+    def step(self, action):
+        """
+        action: integer index into self.discrete_actions
+        """
+        continuous_action = self.discrete_actions[int(action)]
+        obs, reward, terminated, truncated, info = self.base_env.step(continuous_action)
+        state = self._obs_to_state()
+        return state, reward, terminated, truncated, info
+
+    def render(self):
+        # Delegate to the base env's render (mainly for human mode)
+        return self.base_env.render()
+
+    def close(self):
+        self.base_env.close()
